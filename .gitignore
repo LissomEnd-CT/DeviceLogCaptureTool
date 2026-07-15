@@ -1,0 +1,4 @@
+DeviceLogs/*
+!DeviceLogs/.gitkeep
+*.tmp
+*.zip
