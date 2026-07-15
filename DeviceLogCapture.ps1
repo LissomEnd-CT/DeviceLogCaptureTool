@@ -16,6 +16,7 @@ $script:CleanupActions = [System.Collections.Generic.List[scriptblock]]::new()
 $script:TargetFilter = ''
 $script:ExitCode = 0
 $script:CompletedSuccessfully = $false
+$script:GitHubHeaders = @{}
 
 function Write-Title {
     Clear-Host
@@ -112,7 +113,8 @@ function Start-SelfUpdate($Release, $Config) {
     $assetName = if ($Config.releaseAsset) { [string]$Config.releaseAsset } else { 'DeviceLogCaptureTool.zip' }
     $asset = @($Release.assets | Where-Object { $_.name -eq $assetName }) | Select-Object -First 1
     if (-not $asset) { $asset = @($Release.assets | Where-Object { $_.name -like '*.zip' }) | Select-Object -First 1 }
-    $downloadUrl = if ($asset) { $asset.browser_download_url } else { $Release.zipball_url }
+    $hasAuthorization = $script:GitHubHeaders.ContainsKey('Authorization')
+    $downloadUrl = if ($asset -and $hasAuthorization -and $asset.url) { $asset.url } elseif ($asset) { $asset.browser_download_url } else { $Release.zipball_url }
     if (-not $downloadUrl -or $downloadUrl -notmatch '^https://') { throw 'La release non contiene un download ZIP HTTPS valido.' }
 
     $tempRoot = Join-Path $env:TEMP "DeviceLogCapture-update-$([guid]::NewGuid().ToString('N'))"
@@ -120,7 +122,10 @@ function Start-SelfUpdate($Release, $Config) {
     $extractPath = Join-Path $tempRoot 'extracted'
     New-Item -ItemType Directory -Path $extractPath -Force | Out-Null
     Write-Host 'Download aggiornamento...' -ForegroundColor Cyan
-    Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $zipPath -TimeoutSec 60 -Headers @{ 'User-Agent' = 'DeviceLogCaptureTool' }
+    $downloadHeaders = @{}
+    foreach ($key in $script:GitHubHeaders.Keys) { $downloadHeaders[$key] = $script:GitHubHeaders[$key] }
+    $downloadHeaders['Accept'] = 'application/octet-stream'
+    Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $zipPath -TimeoutSec 60 -Headers $downloadHeaders
     Expand-Archive -LiteralPath $zipPath -DestinationPath $extractPath -Force
 
     $launcher = Get-ChildItem -LiteralPath $extractPath -Filter 'DeviceLogCapture.cmd' -File -Recurse | Select-Object -First 1
@@ -165,8 +170,20 @@ function Test-ForUpdates {
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $headers = @{ 'User-Agent' = 'DeviceLogCaptureTool'; 'Accept' = 'application/vnd.github+json' }
+        $tokenVariable = if ($config.githubTokenEnvironmentVariable) { [string]$config.githubTokenEnvironmentVariable } else { 'DEVICE_LOG_CAPTURE_GITHUB_TOKEN' }
+        $token = [Environment]::GetEnvironmentVariable($tokenVariable)
+        if ([string]::IsNullOrWhiteSpace($token)) {
+            $gh = Get-ToolPath @('gh.exe', 'gh')
+            if ($gh) {
+                $tokenOutput = & $gh auth token 2>$null
+                if ($LASTEXITCODE -eq 0) { $token = ($tokenOutput | Select-Object -First 1).ToString().Trim() }
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($token)) { $headers['Authorization'] = "Bearer $token" }
+        $script:GitHubHeaders = $headers
         $apiUrl = "https://api.github.com/repos/$repository/releases/latest"
-        $release = Invoke-RestMethod -UseBasicParsing -Uri $apiUrl -TimeoutSec 10 -Headers @{ 'User-Agent' = 'DeviceLogCaptureTool'; 'Accept' = 'application/vnd.github+json' }
+        $release = Invoke-RestMethod -UseBasicParsing -Uri $apiUrl -TimeoutSec 10 -Headers $headers
         $latestText = ([string]$release.tag_name) -replace '^[vV]', ''
         if ((Convert-ToVersion $latestText) -le (Convert-ToVersion $CurrentVersion)) {
             Write-Host "[UPDATE] Versione $CurrentVersion aggiornata." -ForegroundColor Green
@@ -184,6 +201,9 @@ function Test-ForUpdates {
         return $true
     } catch {
         Write-Host "[UPDATE] Controllo non riuscito: $($_.Exception.Message)" -ForegroundColor Yellow
+        if (-not $script:GitHubHeaders.ContainsKey('Authorization')) {
+            Write-Host 'Se la repo è privata, eseguire gh auth login oppure configurare DEVICE_LOG_CAPTURE_GITHUB_TOKEN.' -ForegroundColor DarkYellow
+        }
         Write-Host 'Il tool continuerà normalmente.' -ForegroundColor DarkGray
         Write-Host
         return $false
