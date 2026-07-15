@@ -44,8 +44,7 @@ Il canale ufficiale è già configurato in `update-config.json`:
 ```json
 {
   "githubRepository": "LissomEnd-CT/DeviceLogCaptureTool",
-  "releaseAsset": "DeviceLogCaptureTool.zip",
-  "githubTokenEnvironmentVariable": "DEVICE_LOG_CAPTURE_GITHUB_TOKEN"
+  "releaseAsset": "DeviceLogCaptureTool.zip"
 }
 ```
 
@@ -69,15 +68,8 @@ Durante l'aggiornamento vengono preservati:
 Al termine il tool aggiornato viene riaperto automaticamente. Se l'aggiornamento
 fallisce, i dettagli vengono scritti in `DeviceLogs/update-error.log`.
 
-La repo ufficiale è privata. Per autorizzare il controllo aggiornamenti usare una
-delle seguenti modalità:
-
-1. installare GitHub CLI ed eseguire `gh auth login`; il tool riusa la sessione;
-2. impostare `DEVICE_LOG_CAPTURE_GITHUB_TOKEN` con un token che abbia accesso in
-   sola lettura ai contenuti della repo.
-
-Il token viene mantenuto soltanto in memoria e non viene scritto nei log o nei
-file del tool. Se la repo diventa pubblica, non è necessaria autenticazione.
+La repo e le release ufficiali sono pubbliche: il controllo e il download degli
+aggiornamenti non richiedono account GitHub, token o configurazione manuale.
 
 ## Requisiti per piattaforma
 

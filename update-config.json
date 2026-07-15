@@ -1,5 +1,4 @@
 {
   "githubRepository": "LissomEnd-CT/DeviceLogCaptureTool",
-  "releaseAsset": "DeviceLogCaptureTool.zip",
-  "githubTokenEnvironmentVariable": "DEVICE_LOG_CAPTURE_GITHUB_TOKEN"
+  "releaseAsset": "DeviceLogCaptureTool.zip"
 }
