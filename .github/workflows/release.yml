@@ -32,6 +32,8 @@ jobs:
             }
           }
           node --check lib/cdp-capture.js
+          & ./tests/Static-Smoke.ps1
+          node --test tests/recorder-smoke.test.js
 
       - name: Validate tag and package
         shell: bash

@@ -43,6 +43,33 @@ function Get-ToolPath([string[]]$Names, [string[]]$Fallbacks = @()) {
     return $null
 }
 
+function ConvertTo-WindowsCommandLineArgument([string]$Value) {
+    if ($null -eq $Value -or $Value.Length -eq 0) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+
+    $builder = [Text.StringBuilder]::new()
+    [void]$builder.Append('"')
+    $backslashes = 0
+    foreach ($character in $Value.ToCharArray()) {
+        if ($character -eq [char]92) {
+            $backslashes++
+            continue
+        }
+        if ($character -eq [char]34) {
+            if ($backslashes) { [void]$builder.Append([string]::new([char]92, $backslashes * 2)) }
+            [void]$builder.Append('\"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes) { [void]$builder.Append([string]::new([char]92, $backslashes)) }
+        [void]$builder.Append($character)
+        $backslashes = 0
+    }
+    if ($backslashes) { [void]$builder.Append([string]::new([char]92, $backslashes * 2)) }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
+
 function Invoke-ToolText([string]$FilePath, [string[]]$Arguments = @()) {
     # ADB/SDB can write normal daemon startup messages to stderr. With the global
     # ErrorActionPreference=Stop, Windows PowerShell 5.1 would turn those into a
@@ -259,6 +286,17 @@ function Get-InspectorInfo([string]$Text) {
     if ($queryMatch.Success) {
         $decoded = [Uri]::UnescapeDataString($queryMatch.Groups[1].Value)
         if ($decoded -notmatch '^wss?://') { $decoded = "ws://$decoded" }
+        try {
+            $decodedUri = [Uri]$decoded
+            if ($decodedUri.Host -in @('0.0.0.0', '[::]', '::')) {
+                $pageMatch = [regex]::Match($Text, 'https?://([^/:\s]+)', 'IgnoreCase')
+                if ($pageMatch.Success) {
+                    $builder = [UriBuilder]$decodedUri
+                    $builder.Host = $pageMatch.Groups[1].Value
+                    $decoded = $builder.Uri.AbsoluteUri
+                }
+            }
+        } catch { }
         $result.WsUrl = $decoded
         return [pscustomobject]$result
     }
@@ -275,7 +313,8 @@ function Get-InspectorInfo([string]$Text) {
 function Get-CdpTargets([string]$HostName, [int]$Port) {
     foreach ($route in @('/json/list', '/json')) {
         try {
-            $items = @(Invoke-RestMethod -Uri "http://${HostName}:$Port$route" -TimeoutSec 3)
+            $response = Invoke-RestMethod -Uri "http://${HostName}:$Port$route" -TimeoutSec 3
+            $items = @($response)
             if ($items.Count -gt 0) { return $items }
         } catch { }
     }
@@ -553,7 +592,13 @@ try {
     Remove-Item $stopFile,$stdout,$stderr -Force -ErrorAction SilentlyContinue
     $args = @($Recorder, '--ws-url', $connection.WsUrl, '--output', $OutputRoot, '--stop-file', $stopFile, '--name', $captureName)
     if ($reloadAnswer -match '^(s|si|sì|y|yes)$') { $args += '--reload' }
-    $process = Start-Process -FilePath $node -ArgumentList $args -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
+    $quotedArguments = @(
+        $args | ForEach-Object {
+            ConvertTo-WindowsCommandLineArgument -Value ([string]$_)
+        }
+    )
+    $argumentLine = $quotedArguments -join ' '
+    $process = Start-Process -FilePath $node -ArgumentList $argumentLine -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
     $script:CleanupActions.Add({ if (-not $process.HasExited) { Stop-ProcessTree -ProcessId $process.Id }; Remove-Item $stopFile,$stdout,$stderr -Force -ErrorAction SilentlyContinue }.GetNewClosure())
 
     $deadline = (Get-Date).AddSeconds(12)

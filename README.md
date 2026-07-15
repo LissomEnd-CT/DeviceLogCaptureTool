@@ -132,7 +132,9 @@ port-forward.
 ### Endpoint diretto
 
 Sono accettati link `http://...devtools...?ws=...`, URL `ws://...` ed endpoint
-HTTP che espongono `/json/list`.
+HTTP che espongono `/json/list` oppure `/json`. Gli indirizzi WebSocket
+`0.0.0.0` restituiti da alcuni inspector vengono sostituiti automaticamente con
+l'host del link HTTP.
 
 Gli inspector WebKit legacy sulla porta `9998`, come alcuni decoder Movistar,
 accettano una sola sessione per avvio dell'app e possono chiuderla durante un
