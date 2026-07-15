@@ -11,12 +11,17 @@ $Recorder = Join-Path $ScriptRoot 'lib\cdp-capture.js'
 $OutputRoot = Join-Path $ScriptRoot 'DeviceLogs'
 $VersionFile = Join-Path $ScriptRoot 'VERSION'
 $UpdateConfigFile = Join-Path $ScriptRoot 'update-config.json'
+$SdkManager = Join-Path $ScriptRoot 'lib\Manage-Sdks.ps1'
 $CurrentVersion = if (Test-Path -LiteralPath $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { '0.0.0' }
 $script:CleanupActions = [System.Collections.Generic.List[scriptblock]]::new()
 $script:TargetFilter = ''
 $script:ExitCode = 0
 $script:CompletedSuccessfully = $false
 $script:GitHubHeaders = @{}
+
+if (-not (Test-Path -LiteralPath $SdkManager)) { throw "Gestore SDK non trovato: $SdkManager" }
+. $SdkManager
+Initialize-ManagedSdkPaths
 
 function Write-Title {
     Clear-Host
@@ -38,11 +43,24 @@ function Get-ToolPath([string[]]$Names, [string[]]$Fallbacks = @()) {
     return $null
 }
 
+function Invoke-ToolText([string]$FilePath, [string[]]$Arguments = @()) {
+    # ADB/SDB can write normal daemon startup messages to stderr. With the global
+    # ErrorActionPreference=Stop, Windows PowerShell 5.1 would turn those into a
+    # false dependency failure even when the command exits successfully.
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        return (& $FilePath @Arguments 2>&1 | Out-String)
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 function Show-DependencyChecks {
     Write-Host 'Verifica dipendenze e configurazione:' -ForegroundColor Yellow
     $rows = [System.Collections.Generic.List[object]]::new()
 
-    $node = Get-ToolPath @('node.exe', 'node') @('C:\Program Files\nodejs\node.exe')
+    $node = Get-ToolPath @('node.exe', 'node') (@(Get-ManagedSdkFallbacks 'node') + @('C:\Program Files\nodejs\node.exe'))
     $nodeReady = $false
     $nodeDetail = 'Non trovato - installare Node.js 22 o successivo'
     if ($node) {
@@ -55,11 +73,11 @@ function Show-DependencyChecks {
     }
     $rows.Add([pscustomobject]@{ Dipendenza = 'Node.js'; Stato = if ($nodeReady) { 'OK' } else { 'ERRORE' }; Dettagli = $nodeDetail })
 
-    $ares = Get-ToolPath @('ares-inspect.cmd', 'ares-inspect') @("$env:APPDATA\npm\ares-inspect.cmd")
-    $setup = Get-ToolPath @('ares-setup-device.cmd', 'ares-setup-device') @("$env:APPDATA\npm\ares-setup-device.cmd")
+    $ares = Get-ToolPath @('ares-inspect.cmd', 'ares-inspect') (@(Get-ManagedSdkFallbacks 'ares-inspect') + @("$env:APPDATA\npm\ares-inspect.cmd"))
+    $setup = Get-ToolPath @('ares-setup-device.cmd', 'ares-setup-device') (@(Get-ManagedSdkFallbacks 'ares-setup-device') + @("$env:APPDATA\npm\ares-setup-device.cmd"))
     if ($ares -and $setup) {
         try {
-            $aresDevices = & $setup --list 2>&1 | Out-String
+            $aresDevices = Invoke-ToolText $setup @('--list')
             $deviceCount = @([regex]::Matches($aresDevices, '(?m)^\S.*?@[^:]+:\d+\s+')).Count
             $aresState = if ($deviceCount -gt 0) { 'OK' } else { 'WARN' }
             $aresDetail = "webOS CLI presente; device configurati: $deviceCount"
@@ -67,10 +85,10 @@ function Show-DependencyChecks {
     } else { $aresState = 'MANCANTE'; $aresDetail = 'Installare @webos-tools/cli' }
     $rows.Add([pscustomobject]@{ Dipendenza = 'webOS CLI'; Stato = $aresState; Dettagli = $aresDetail })
 
-    $adb = Get-ToolPath @('adb.exe', 'adb') @('C:\platform-tools\adb.exe', "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe")
+    $adb = Get-ToolPath @('adb.exe', 'adb') (@(Get-ManagedSdkFallbacks 'adb') + @('C:\platform-tools\adb.exe', "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"))
     if ($adb) {
         try {
-            $adbDevices = & $adb devices 2>&1 | Out-String
+            $adbDevices = Invoke-ToolText $adb @('devices')
             $androidReady = @([regex]::Matches($adbDevices, '(?m)^\S+\s+device\s*$')).Count
             $androidUnauthorized = @([regex]::Matches($adbDevices, '(?m)^\S+\s+unauthorized\s*$')).Count
             $adbDetail = "ADB presente; connessi: $androidReady"
@@ -80,10 +98,10 @@ function Show-DependencyChecks {
     } else { $adbState = 'MANCANTE'; $adbDetail = 'Installare Android platform-tools' }
     $rows.Add([pscustomobject]@{ Dipendenza = 'ADB'; Stato = $adbState; Dettagli = $adbDetail })
 
-    $sdb = Get-ToolPath @('sdb.exe', 'sdb') @('C:\tizen-studio\tools\sdb.exe')
+    $sdb = Get-ToolPath @('sdb.exe', 'sdb') (@(Get-ManagedSdkFallbacks 'sdb') + @('C:\tizen-studio\tools\sdb.exe'))
     if ($sdb) {
         try {
-            $sdbDevices = & $sdb devices 2>&1 | Out-String
+            $sdbDevices = Invoke-ToolText $sdb @('devices')
             $tizenReady = @([regex]::Matches($sdbDevices, '(?m)^\S+\s+device(?:\s+.*)?$')).Count
             $sdbState = 'OK'; $sdbDetail = "SDB presente; connessi: $tizenReady"
         } catch { $sdbState = 'WARN'; $sdbDetail = 'SDB presente, verifica device fallita' }
@@ -312,8 +330,8 @@ function Resolve-Direct([string]$InputText) {
 }
 
 function Start-WebOsInspector([string]$InputText, [string]$AppId) {
-    $ares = Get-ToolPath @('ares-inspect.cmd', 'ares-inspect') @("$env:APPDATA\npm\ares-inspect.cmd")
-    $setup = Get-ToolPath @('ares-setup-device.cmd', 'ares-setup-device') @("$env:APPDATA\npm\ares-setup-device.cmd")
+    $ares = Get-ToolPath @('ares-inspect.cmd', 'ares-inspect') (@(Get-ManagedSdkFallbacks 'ares-inspect') + @("$env:APPDATA\npm\ares-inspect.cmd"))
+    $setup = Get-ToolPath @('ares-setup-device.cmd', 'ares-setup-device') (@(Get-ManagedSdkFallbacks 'ares-setup-device') + @("$env:APPDATA\npm\ares-setup-device.cmd"))
     if (-not $ares -or -not $setup) { throw 'webOS CLI non trovato: installare @webos-tools/cli.' }
 
     $device = $null
@@ -376,7 +394,7 @@ function Select-ConnectedDevice([string[]]$Serials, [string]$Suggested, [string]
 }
 
 function Start-AndroidInspector([string]$InputText) {
-    $adb = Get-ToolPath @('adb.exe', 'adb') @('C:\platform-tools\adb.exe', "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe")
+    $adb = Get-ToolPath @('adb.exe', 'adb') (@(Get-ManagedSdkFallbacks 'adb') + @('C:\platform-tools\adb.exe', "$env:LOCALAPPDATA\Android\Sdk\platform-tools\adb.exe"))
     if (-not $adb) { throw 'ADB non trovato. Installare Android platform-tools.' }
     $ip = Get-IPv4 $InputText
     if ($ip) {
@@ -403,7 +421,7 @@ function Start-AndroidInspector([string]$InputText) {
 }
 
 function Start-TizenInspector([string]$InputText, [string]$AppId) {
-    $sdb = Get-ToolPath @('sdb.exe', 'sdb') @('C:\tizen-studio\tools\sdb.exe')
+    $sdb = Get-ToolPath @('sdb.exe', 'sdb') (@(Get-ManagedSdkFallbacks 'sdb') + @('C:\tizen-studio\tools\sdb.exe'))
     if (-not $sdb) { throw 'SDB non trovato. Installare Tizen Studio.' }
     $ip = Get-IPv4 $InputText
     if ($ip) {
@@ -442,7 +460,14 @@ try {
     if (Test-ForUpdates) { exit 0 }
     if (-not (Test-Path -LiteralPath $Recorder)) { throw "Recorder non trovato: $Recorder" }
     $dependencies = Show-DependencyChecks
-    if (-not $dependencies.NodeReady) { throw 'Node.js 22 o successivo è obbligatorio per avviare il recorder.' }
+    $managerPrompt = if ($dependencies.NodeReady) { 'Gestire/installare/aggiornare SDK? [g/N]' } else { 'Node.js 22+ manca. Aprire la gestione automatica? [S/n]' }
+    $managerAnswer = Read-Host $managerPrompt
+    if (($dependencies.NodeReady -and $managerAnswer -match '^(?i:g|gestisci|s|si|sì|y|yes)$') -or
+        (-not $dependencies.NodeReady -and $managerAnswer -notmatch '^(?i:n|no)$')) {
+        Show-SdkManager
+        $dependencies = Show-DependencyChecks
+    }
+    if (-not $dependencies.NodeReady) { throw 'Node.js 22 o successivo è obbligatorio. Usare Gestione SDK per installarlo automaticamente.' }
     $node = $dependencies.NodePath
 
     Write-Host 'Incolla uno dei seguenti valori:' -ForegroundColor Yellow

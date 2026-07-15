@@ -15,6 +15,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Validate PowerShell and Node.js sources
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile(
+              $_.FullName,
+              [ref]$tokens,
+              [ref]$errors
+            ) | Out-Null
+            if ($errors) {
+              $errors | ForEach-Object { Write-Error "$($_.Extent.File):$($_.Extent.StartLineNumber): $($_.Message)" }
+              throw "PowerShell parser validation failed for $($_.FullName)"
+            }
+          }
+          node --check lib/cdp-capture.js
+
       - name: Validate tag and package
         shell: bash
         run: |

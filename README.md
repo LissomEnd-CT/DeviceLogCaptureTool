@@ -33,6 +33,34 @@ All'avvio viene mostrato lo stato di:
 Una dipendenza `MANCANTE` non blocca le altre piattaforme. Node.js è l'unica
 dipendenza comune e obbligatoria.
 
+## Installazione e aggiornamento SDK
+
+Subito dopo il controllo dipendenze, digitare `G` per aprire la gestione SDK.
+Dal menu è possibile installare o aggiornare una singola dipendenza oppure tutte:
+
+- Node.js LTS 22 o successivo;
+- webOS CLI/Ares;
+- Android Platform Tools/ADB;
+- Tizen SDB.
+
+Le installazioni vengono salvate per il solo utente in
+`%LOCALAPPDATA%\DeviceLogCaptureTool\Sdk` e caricate automaticamente a ogni
+avvio. Non servono privilegi amministrativi e il tool non sovrascrive gli SDK
+aziendali o le installazioni di Tizen Studio/Android Studio già presenti.
+
+I pacchetti provengono esclusivamente dai canali ufficiali: Node.js viene anche
+verificato con il manifest SHA-256 della release, Android Platform Tools arriva
+da Google, SDB dal repository Tizen Studio e Ares dal pacchetto npm
+`@webos-tools/cli`. Dopo ogni operazione il relativo eseguibile viene avviato e
+verificato. Pairing, Developer Mode, certificati e firma delle app restano
+configurazioni specifiche del device e non possono essere automatizzate in modo
+generico.
+
+Riferimenti ufficiali: [Node.js](https://nodejs.org/en/download),
+[Android Platform Tools](https://developer.android.com/tools/releases/platform-tools),
+[webOS CLI](https://webostv.developer.lge.com/develop/tools/cli-installation) e
+[repository Tizen Studio](https://download.tizen.org/sdk/tizenstudio/official/binary/).
+
 ## Aggiornamenti automatici
 
 La versione installata è contenuta nel file `VERSION`. A ogni avvio il tool
@@ -117,7 +145,8 @@ DeviceLogCaptureTool/
 |-- update-config.json         Repository e asset delle GitHub Releases
 |-- lib/
 |   |-- cdp-capture.js         Motore HAR/console
-|   `-- Apply-Update.ps1       Installazione aggiornamenti
+|   |-- Apply-Update.ps1       Installazione aggiornamenti del tool
+|   `-- Manage-Sdks.ps1        Installazione e aggiornamento SDK
 `-- DeviceLogs/                File generati
 ```
 
