@@ -539,6 +539,12 @@ try {
     }
     if (-not $connection -or -not $connection.WsUrl) { throw 'Impossibile trovare o creare un endpoint DevTools/CDP.' }
 
+    if ($connection.Port -eq 9998 -and $reloadAnswer -match '^(s|si|sì|y|yes)$') {
+        Write-Host 'Il vecchio Web Inspector sulla porta 9998 chiude la sessione durante il reload.' -ForegroundColor Yellow
+        Write-Host "Reload disattivato: riaprire manualmente l'app prima della cattura per acquisire i log iniziali." -ForegroundColor Yellow
+        $reloadAnswer = ''
+    }
+
     New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
     $runId = [guid]::NewGuid().ToString('N')
     $stopFile = Join-Path $env:TEMP "device-log-stop-$runId"

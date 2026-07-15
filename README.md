@@ -134,6 +134,14 @@ port-forward.
 Sono accettati link `http://...devtools...?ws=...`, URL `ws://...` ed endpoint
 HTTP che espongono `/json/list`.
 
+Gli inspector WebKit legacy sulla porta `9998`, come alcuni decoder Movistar,
+accettano una sola sessione per avvio dell'app e possono chiuderla durante un
+reload. Per questi endpoint il tool disattiva il reload automatico. Quando il
+runtime non espone eventi `Network.*`, le URL delle XHR e gli errori HTTP
+presenti nella console vengono convertiti in entry HAR contrassegnate con
+`_fromConsole: true`; status, header e timing non riportati dal firmware restano
+necessariamente incompleti.
+
 ## Struttura della cartella
 
 ```text
