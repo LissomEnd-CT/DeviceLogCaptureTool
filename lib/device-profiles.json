@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "profiles": [
+    {
+      "id": "auto",
+      "label": "Rilevamento automatico",
+      "ports": [],
+      "disableReload": false,
+      "forceNetworkHook": false,
+      "hint": "Prova tutte le famiglie note e le porte Chromium comuni."
+    },
+    {
+      "id": "chromium-generic",
+      "label": "Chromium / WebView generico",
+      "ports": [9222, 9223, 9229, 8080, 9999],
+      "disableReload": false,
+      "forceNetworkHook": false,
+      "hint": "Endpoint CDP standard esposto direttamente dal device."
+    },
+    {
+      "id": "tizen-hbbtv",
+      "label": "Samsung Tizen HbbTV 8+",
+      "ports": [7014, 7011],
+      "disableReload": false,
+      "forceNetworkHook": false,
+      "hint": "Per le app Tizen installate usare invece la modalità Tizen/SDB."
+    },
+    {
+      "id": "vidaa",
+      "label": "Hisense Vidaa",
+      "ports": [9226],
+      "disableReload": false,
+      "forceNetworkHook": false,
+      "hint": "Sul TV abilitare DebugOn da hisense://debug."
+    },
+    {
+      "id": "titanos",
+      "label": "TitanOS DevView",
+      "ports": [7001],
+      "disableReload": false,
+      "forceNetworkHook": false,
+      "hint": "DevView deve essere attivo sul TV."
+    },
+    {
+      "id": "skyglass",
+      "label": "Sky Glass",
+      "ports": [8090],
+      "disableReload": true,
+      "forceNetworkHook": true,
+      "hint": "Riavviare l'app dai Developer Settings per acquisire il network iniziale."
+    },
+    {
+      "id": "panasonic-viera",
+      "label": "Panasonic Viera",
+      "ports": [52223],
+      "disableReload": false,
+      "forceNetworkHook": true,
+      "hint": "Inspector WebKit diretto del TV."
+    },
+    {
+      "id": "movistar-bob",
+      "label": "Movistar BOB",
+      "ports": [9224],
+      "disableReload": true,
+      "forceNetworkHook": true,
+      "hint": "Accetta anche link inspector://IP:9224."
+    },
+    {
+      "id": "movistar-legacy",
+      "label": "Movistar / WebKit legacy",
+      "ports": [9998],
+      "disableReload": true,
+      "forceNetworkHook": true,
+      "hint": "Un solo debugger per avvio dell'app; chiudere Chromium DevTools."
+    }
+  ]
+}

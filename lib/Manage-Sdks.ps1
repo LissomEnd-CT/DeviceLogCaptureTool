@@ -45,6 +45,26 @@ function Invoke-OfficialDownload([string]$Uri, [string]$Destination) {
     }
 }
 
+function Install-ManagedDirectoryAtomically([string]$Source, [string]$Destination, [scriptblock]$Verify) {
+    if (-not (Test-Path -LiteralPath $Source)) { throw "Sorgente SDK non trovata: $Source" }
+    $parent = Split-Path -Parent $Destination
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    $backup = "$Destination.backup-$([guid]::NewGuid().ToString('N'))"
+    $hadExisting = Test-Path -LiteralPath $Destination
+    if ($hadExisting) { Move-Item -LiteralPath $Destination -Destination $backup }
+    try {
+        Move-Item -LiteralPath $Source -Destination $Destination
+        $verification = & $Verify $Destination
+        if ($hadExisting) { Remove-Item -LiteralPath $backup -Recurse -Force -ErrorAction SilentlyContinue }
+        return $verification
+    } catch {
+        $failure = $_
+        if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force -ErrorAction SilentlyContinue }
+        if ($hadExisting -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $Destination }
+        throw $failure
+    }
+}
+
 function Install-NodeLtsManaged {
     Write-Host 'Node.js LTS: ricerca della release ufficiale...' -ForegroundColor Cyan
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -90,11 +110,13 @@ function Install-NodeLtsManaged {
         Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
         $packageRoot = Join-Path $extract "node-$version-win-x64"
         if (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'node.exe'))) { throw 'node.exe non trovato nel pacchetto ufficiale.' }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $script:ManagedNodeRoot) -Force | Out-Null
-        if (Test-Path -LiteralPath $script:ManagedNodeRoot) { Remove-Item -LiteralPath $script:ManagedNodeRoot -Recurse -Force }
-        Move-Item -LiteralPath $packageRoot -Destination $script:ManagedNodeRoot
+        $installed = Install-ManagedDirectoryAtomically $packageRoot $script:ManagedNodeRoot {
+            param($installedRoot)
+            $output = & (Join-Path $installedRoot 'node.exe') --version 2>&1
+            if ($LASTEXITCODE -ne 0) { throw 'Node.js è stato copiato ma la verifica è fallita.' }
+            return ($output | Select-Object -First 1).ToString().Trim()
+        }
         Initialize-ManagedSdkPaths
-        $installed = & (Join-Path $script:ManagedNodeRoot 'node.exe') --version 2>&1
         Write-Host "  [OK] Node.js $installed installato e verificato." -ForegroundColor Green
     } finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
@@ -109,20 +131,33 @@ function Install-WebOsCliManaged {
         $npm = Get-ToolPath @('npm.cmd', 'npm') (Get-ManagedSdkFallbacks 'npm')
     }
     if (-not $npm) { throw "npm non è disponibile dopo l'installazione di Node.js." }
-    New-Item -ItemType Directory -Path $script:ManagedWebOsRoot -Force | Out-Null
-    & $npm install --global --prefix $script:ManagedWebOsRoot '--allow-scripts=@webos-tools/cli,fsevents,ssh2' '@webos-tools/cli@latest'
-    if ($LASTEXITCODE -ne 0) { throw "npm ha terminato con codice $LASTEXITCODE." }
-    Initialize-ManagedSdkPaths
-    $inspect = Join-Path $script:ManagedWebOsRoot 'ares-inspect.cmd'
-    $setup = Join-Path $script:ManagedWebOsRoot 'ares-setup-device.cmd'
-    if (-not (Test-Path -LiteralPath $inspect) -or -not (Test-Path -LiteralPath $setup)) {
-        throw 'Il pacchetto npm non ha installato tutti i comandi Ares richiesti.'
+    $temp = New-SdkTempDirectory 'webos'
+    try {
+        $stagedRoot = Join-Path $temp 'webos-cli'
+        New-Item -ItemType Directory -Path $stagedRoot -Force | Out-Null
+        & $npm install --global --prefix $stagedRoot '--allow-scripts=@webos-tools/cli,fsevents,ssh2' '@webos-tools/cli@latest'
+        if ($LASTEXITCODE -ne 0) { throw "npm ha terminato con codice $LASTEXITCODE." }
+        $stagedInspect = Join-Path $stagedRoot 'ares-inspect.cmd'
+        $stagedSetup = Join-Path $stagedRoot 'ares-setup-device.cmd'
+        if (-not (Test-Path -LiteralPath $stagedInspect) -or -not (Test-Path -LiteralPath $stagedSetup)) {
+            throw 'Il pacchetto npm non contiene tutti i comandi Ares richiesti.'
+        }
+        $version = Install-ManagedDirectoryAtomically $stagedRoot $script:ManagedWebOsRoot {
+            param($installedRoot)
+            $inspect = Join-Path $installedRoot 'ares-inspect.cmd'
+            $setup = Join-Path $installedRoot 'ares-setup-device.cmd'
+            if (-not (Test-Path -LiteralPath $inspect) -or -not (Test-Path -LiteralPath $setup)) {
+                throw "I comandi Ares non sono disponibili dopo l'installazione."
+            }
+            $versionOutput = & $inspect --version 2>&1
+            if ($LASTEXITCODE -ne 0) { throw 'ares-inspect è stato installato ma la verifica è fallita.' }
+            return ($versionOutput | Select-Object -First 1).ToString().Trim()
+        }
+        Initialize-ManagedSdkPaths
+        Write-Host "  [OK] webOS CLI $version installata e verificata." -ForegroundColor Green
+    } finally {
+        Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
-    $versionOutput = & $inspect --version 2>&1
-    $verifyExitCode = $LASTEXITCODE
-    $version = ($versionOutput | Select-Object -First 1).ToString().Trim()
-    if ($verifyExitCode -ne 0) { throw 'ares-inspect è stato installato ma la verifica è fallita.' }
-    Write-Host "  [OK] webOS CLI $version installata e verificata." -ForegroundColor Green
 }
 
 function Install-AndroidPlatformToolsManaged {
@@ -137,12 +172,13 @@ function Install-AndroidPlatformToolsManaged {
         if (-not (Test-Path -LiteralPath (Join-Path $packageRoot 'adb.exe'))) { throw 'adb.exe non trovato nel pacchetto ufficiale.' }
         $activeAdb = Get-ToolPath @('adb.exe', 'adb') (Get-ManagedSdkFallbacks 'adb')
         if ($activeAdb) { & $activeAdb kill-server 2>&1 | Out-Null }
-        New-Item -ItemType Directory -Path (Split-Path -Parent $script:ManagedAndroidRoot) -Force | Out-Null
-        if (Test-Path -LiteralPath $script:ManagedAndroidRoot) { Remove-Item -LiteralPath $script:ManagedAndroidRoot -Recurse -Force }
-        Move-Item -LiteralPath $packageRoot -Destination $script:ManagedAndroidRoot
+        $version = Install-ManagedDirectoryAtomically $packageRoot $script:ManagedAndroidRoot {
+            param($installedRoot)
+            $output = & (Join-Path $installedRoot 'adb.exe') version 2>&1
+            if ($LASTEXITCODE -ne 0) { throw 'ADB è stato copiato ma la verifica è fallita.' }
+            return ($output | Select-Object -First 1).ToString().Trim()
+        }
         Initialize-ManagedSdkPaths
-        $version = (& (Join-Path $script:ManagedAndroidRoot 'adb.exe') version 2>&1 | Select-Object -First 1).ToString().Trim()
-        if ($LASTEXITCODE -ne 0) { throw 'ADB è stato installato ma la verifica è fallita.' }
         Write-Host "  [OK] $version" -ForegroundColor Green
     } finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
@@ -176,12 +212,13 @@ function Install-TizenSdbManaged {
         $activeSdb = Get-ToolPath @('sdb.exe', 'sdb') (Get-ManagedSdkFallbacks 'sdb')
         if ($activeSdb) { & $activeSdb kill-server 2>&1 | Out-Null }
         Get-Process sdb -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-        New-Item -ItemType Directory -Path (Split-Path -Parent $script:ManagedTizenRoot) -Force | Out-Null
-        if (Test-Path -LiteralPath $script:ManagedTizenRoot) { Remove-Item -LiteralPath $script:ManagedTizenRoot -Recurse -Force }
-        Move-Item -LiteralPath $packageRoot -Destination $script:ManagedTizenRoot
+        $version = Install-ManagedDirectoryAtomically $packageRoot $script:ManagedTizenRoot {
+            param($installedRoot)
+            $output = & (Join-Path $installedRoot 'sdb.exe') version 2>&1
+            if ($LASTEXITCODE -ne 0) { throw 'SDB è stato copiato ma la verifica è fallita.' }
+            return ($output | Select-Object -First 1).ToString().Trim()
+        }
         Initialize-ManagedSdkPaths
-        $version = (& (Join-Path $script:ManagedTizenRoot 'sdb.exe') version 2>&1 | Select-Object -First 1).ToString().Trim()
-        if ($LASTEXITCODE -ne 0) { throw 'SDB è stato installato ma la verifica è fallita.' }
         Write-Host "  [OK] Tizen SDB $version installato e verificato." -ForegroundColor Green
     } finally {
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue

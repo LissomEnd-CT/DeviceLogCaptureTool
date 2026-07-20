@@ -1,7 +1,8 @@
 # Device Log Capture
 
 Tool portabile per esportare un file HAR della rete e un file LOG della console
-da applicazioni Web/WebView su webOS, Tizen e Android.
+da applicazioni Web/WebView su TV, set-top box, webOS, Tizen, Android e runtime
+Chromium/WebKit con inspector remoto.
 
 Repository: <https://github.com/LissomEnd-CT/DeviceLogCaptureTool>
 
@@ -52,7 +53,9 @@ I pacchetti provengono esclusivamente dai canali ufficiali: Node.js viene anche
 verificato con il manifest SHA-256 della release, Android Platform Tools arriva
 da Google, SDB dal repository Tizen Studio e Ares dal pacchetto npm
 `@webos-tools/cli`. Dopo ogni operazione il relativo eseguibile viene avviato e
-verificato. Pairing, Developer Mode, certificati e firma delle app restano
+verificato. Gli aggiornamenti vengono preparati separatamente e sostituiti solo
+dopo la verifica; se questa fallisce viene ripristinata la versione precedente.
+Pairing, Developer Mode, certificati e firma delle app restano
 configurazioni specifiche del device e non possono essere automatizzate in modo
 generico.
 
@@ -93,7 +96,11 @@ Durante l'aggiornamento vengono preservati:
 - `DeviceLogs`, inclusi tutti i HAR e LOG dell'utente;
 - `update-config.json`, così la configurazione della repo non viene persa.
 
-Al termine il tool aggiornato viene riaperto automaticamente. Se l'aggiornamento
+Quando GitHub fornisce il digest dell'asset, lo ZIP viene verificato con SHA-256
+prima dell'estrazione. Il tool controlla inoltre versione, file obbligatori e
+assenza di HAR/LOG nel pacchetto. L'installazione usa backup e rollback: una
+copia incompleta non sostituisce la versione funzionante. Al termine il tool aggiornato viene riaperto
+automaticamente. Se l'aggiornamento
 fallisce, i dettagli vengono scritti in `DeviceLogs/update-error.log`.
 
 La repo e le release ufficiali sono pubbliche: il controllo e il download degli
@@ -109,6 +116,9 @@ aggiornamenti non richiedono account GitHub, token o configurazione manuale.
 - pacchetto npm `@webos-tools/cli` installato.
 
 Il tool associa automaticamente l'IP al nome configurato e avvia `ares-inspect`.
+Accetta sia i link DevTools moderni sia i frontend ospitati usati dai TV più
+vecchi; attende la creazione del tunnel anche quando la CLI termina subito dopo
+aver stampato il link.
 
 ### Android
 
@@ -117,7 +127,10 @@ Il tool associa automaticamente l'IP al nome configurato e avvia `ares-inspect`.
 - per una WebView, `WebView.setWebContentsDebuggingEnabled(true)` abilitato
   nell'applicazione.
 
-Il tool rileva i socket `devtools_remote` e crea/rimuove il port-forward ADB.
+Il tool attende i socket `devtools_remote`, gestisce più WebView/Chrome e
+crea/rimuove il port-forward ADB. Le connessioni ADB di rete create dal tool
+vengono chiuse al termine. Se il device è `unauthorized`, viene mostrata una
+diagnosi specifica invece di un generico errore di connessione.
 
 ### Tizen
 
@@ -127,30 +140,66 @@ Il tool rileva i socket `devtools_remote` e crea/rimuove il port-forward ADB.
 - TV raggiungibile tramite SDB.
 
 Il tool esegue `sdb shell 0 debug`, legge la porta inspector e gestisce il
-port-forward. Per TV con **Tizen 4 o precedente**, selezionare la modalità
-legacy: il comando diventa `sdb shell 0 debug APP_ID 10`, come richiesto dai
-runtime più vecchi. L'opzione viene chiesta prima dell'avvio dell'app. Le
-connessioni e i forward SDB creati dal tool vengono rimossi al termine.
+port-forward. La modalità predefinita è `Auto`: prova prima il comando standard
+e, se non riceve una porta valida, riprova con
+`sdb shell 0 debug APP_ID 10` per Tizen 4 e precedenti. È possibile forzare la
+modalità standard o legacy prima dell'avvio dell'app. Le connessioni e i forward
+SDB creati dal tool vengono rimossi al termine.
 
 ### Endpoint diretto
 
-Sono accettati link `http://...devtools...?ws=...`, URL `ws://...`, link
-`inspector://...`, valori `IP:porta` ed endpoint HTTP che espongono `/json/list`
-oppure `/json`.
-Inserendo il solo IP, la discovery prova anche le porte note per HbbTV Tizen
-(`7014`), TitanOS (`7001`), Vidaa/Hisense (`9226`), Movistar BOB (`9224`),
-SkyGlass (`8090`), Movistar legacy (`9998`) e Panasonic Viera (`52223`), oltre
-alle comuni porte Chromium. Gli indirizzi WebSocket
+Sono accettati link `http://...devtools...?ws=...`, URL `ws://`/`wss://`, link
+`inspector://...`, valori `IP:porta` ed endpoint HTTP/HTTPS che espongono `/json/list`
+oppure `/json`. Se le route JSON non esistono, il tool legge anche la landing
+page dell'inspector e ricava il WebSocket dai link HTML dei firmware legacy.
+Gli indirizzi WebSocket
 `0.0.0.0` restituiti da alcuni inspector vengono sostituiti automaticamente con
 l'host del link HTTP.
 
-Gli inspector WebKit legacy sulla porta `9998`, come alcuni decoder Movistar,
-accettano una sola sessione per avvio dell'app e possono chiuderla durante un
-reload. Per questi endpoint il tool disattiva il reload automatico. Quando il
-runtime non espone eventi `Network.*`, le URL delle XHR e gli errori HTTP
-presenti nella console vengono convertiti in entry HAR contrassegnate con
-`_fromConsole: true`; status, header e timing non riportati dal firmware restano
-necessariamente incompleti.
+### Profili device diretti
+
+Quando viene inserito soltanto un IP si può scegliere un profilo, così le porte
+più probabili vengono provate per prime:
+
+| Famiglia | Porte | Comportamento |
+| --- | ---: | --- |
+| Chromium/WebView generico | 9222, 9223, 9229, 8080, 9999 | CDP standard |
+| Samsung Tizen HbbTV 8+ | 7014, 7011 | Inspector HbbTV diretto |
+| Hisense Vidaa | 9226 | Richiede DebugOn sul TV |
+| TitanOS DevView | 7001 | Richiede DevView attivo |
+| Sky Glass | 8090 | Hook compatibilità, reload automatico disattivato |
+| Panasonic Viera | 52223 | WebKit diretto/legacy |
+| Movistar BOB | 9224 | Accetta anche `inspector://` |
+| Movistar/WebKit legacy | 9998 | Un solo debugger, niente reload automatico |
+
+Il profilo `Auto` prova tutte le famiglie. Una porta non presente nel catalogo
+resta utilizzabile inserendo direttamente `IP:porta`.
+
+### Compatibilità Chromium/WebKit per anno
+
+I domini CDP vengono abilitati indipendentemente e con timeout. La cattura non
+fallisce più soltanto perché un vecchio firmware non implementa `Network`,
+`Console`, `Runtime`, `Log` o `Page`. Il file LOG indica quali domini sono stati
+attivati.
+
+Quando `Network.*` non è disponibile, il recorder usa due fallback:
+
+1. converte URL XHR ed errori HTTP già presenti nella console in entry HAR;
+2. se `Runtime.evaluate` è disponibile, installa temporaneamente un hook XHR e
+   `fetch` nella pagina ispezionata e ricostruisce metodo, URL, status e durata.
+
+Le entry ricostruite sono marcate con `_fromConsole` o `_fromInjectedHook`.
+Header, body e timing non esposti dal firmware non possono essere inventati e
+restano incompleti. L'hook esiste solo nella sessione di debug, viene rimosso
+alla chiusura normale della cattura e non modifica l'app installata.
+
+## Protezione dei dati sensibili
+
+Il progetto non deve contenere credenziali, token, indirizzi personali, URL
+interni o identificativi aziendali. `tests/Sensitive-Data-Smoke.ps1` controlla
+file correnti e cronologia Git; il workflow di release si interrompe prima di
+creare lo ZIP se trova una corrispondenza. I valori eventualmente individuati
+non vengono stampati nei log del test.
 
 ## Struttura della cartella
 
@@ -163,6 +212,7 @@ DeviceLogCaptureTool/
 |-- update-config.json         Repository e asset delle GitHub Releases
 |-- lib/
 |   |-- cdp-capture.js         Motore HAR/console
+|   |-- device-profiles.json   Profili e porte dei device diretti
 |   |-- Apply-Update.ps1       Installazione aggiornamenti del tool
 |   `-- Manage-Sdks.ps1        Installazione e aggiornamento SDK
 `-- DeviceLogs/                File generati

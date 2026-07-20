@@ -23,7 +23,29 @@ class FakeWebSocket {
   send(raw) {
     const command = JSON.parse(raw);
     setTimeout(() => {
+      const injectedSource = command.params && (command.params.expression || command.params.source || command.params.scriptSource);
+      if (process.env.FAKE_CDP_REQUIRE_ES5 === '1' && injectedSource && /(=>|\bconst\b|\blet\b|catch\s*\{)/.test(injectedSource)) {
+        this.message({id: command.id, error: {message: 'Injected source is not ES5 compatible'}});
+        return;
+      }
+      if (command.method === 'Log.enable' && process.env.FAKE_CDP_IGNORE_LOG === '1') return;
+      if (command.method === 'Network.enable' && process.env.FAKE_CDP_DISABLE_NETWORK === '1') {
+        this.message({id: command.id, error: {message: 'Network domain unavailable'}});
+        return;
+      }
       this.message({id: command.id, result: {}});
+      if (command.method === 'Runtime.evaluate' && process.env.FAKE_CDP_EMIT_HOOK === '1'
+          && injectedSource && injectedSource.includes('__DEVICE_LOG_CAPTURE_NETWORK_V1__')) {
+        const now = Date.now();
+        this.message({method: 'Runtime.consoleAPICalled', params: {
+          timestamp: now / 1000,
+          type: 'log',
+          args: [{value: `__DEVICE_LOG_CAPTURE_NETWORK_V1__${JSON.stringify({
+            kind: 'fetch', method: 'POST', url: 'https://example.test/hook', status: 204,
+            statusText: 'No Content', startedAt: now - 25, endedAt: now,
+          })}`}],
+        }});
+      }
       if (command.method === 'Console.enable') {
         const timestamp = Date.now() / 1000;
         this.message({method: 'Console.messageAdded', params: {message: {

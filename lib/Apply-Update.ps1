@@ -3,7 +3,9 @@ param(
     [Parameter(Mandatory = $true)][string]$TargetRoot,
     [Parameter(Mandatory = $true)][string]$SourceRoot,
     [Parameter(Mandatory = $true)][string]$TempRoot,
-    [Parameter(Mandatory = $true)][string]$WaitProcessIds
+    [Parameter(Mandatory = $true)][string]$WaitProcessIds,
+    [Parameter(Mandatory = $true)][string]$ExpectedVersion,
+    [switch]$NoRestart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,21 +25,52 @@ try {
         Start-Sleep -Milliseconds 250
     }
 
-    foreach ($item in Get-ChildItem -LiteralPath $source -Force) {
-        if ($item.Name -in @('DeviceLogs', 'update-config.json')) { continue }
-        $destination = Join-Path $target $item.Name
-        $destinationFull = [IO.Path]::GetFullPath($destination)
-        if (-not $destinationFull.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Destinazione non sicura: $destinationFull"
+    $required = @('DeviceLogCapture.cmd', 'DeviceLogCapture.ps1', 'VERSION', 'lib\cdp-capture.js', 'lib\device-profiles.json')
+    foreach ($relative in $required) {
+        if (-not (Test-Path -LiteralPath (Join-Path $source $relative))) { throw "File richiesto assente nel pacchetto: $relative" }
+    }
+    $sourceVersion = (Get-Content -LiteralPath (Join-Path $source 'VERSION') -Raw -Encoding UTF8).Trim()
+    if ($sourceVersion -ne $ExpectedVersion) { throw "Versione pacchetto inattesa: $sourceVersion (attesa: $ExpectedVersion)." }
+    $unexpectedLogs = @(Get-ChildItem -LiteralPath $source -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in @('.har', '.log') })
+    if ($unexpectedLogs.Count) { throw 'Il pacchetto contiene file HAR/LOG e non verrà installato.' }
+
+    $backupRoot = Join-Path $temp 'backup'
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
+    $installedNames = [System.Collections.Generic.List[string]]::new()
+    $backedUpNames = [System.Collections.Generic.List[string]]::new()
+    try {
+        foreach ($item in Get-ChildItem -LiteralPath $source -Force) {
+            if ($item.Name -in @('DeviceLogs', 'update-config.json')) { continue }
+            $destinationFull = [IO.Path]::GetFullPath((Join-Path $target $item.Name))
+            if (-not $destinationFull.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Destinazione non sicura: $destinationFull"
+            }
+            if (Test-Path -LiteralPath $destinationFull) {
+                Move-Item -LiteralPath $destinationFull -Destination (Join-Path $backupRoot $item.Name)
+                $backedUpNames.Add($item.Name)
+            }
+            $installedNames.Add($item.Name)
+            Copy-Item -LiteralPath $item.FullName -Destination $destinationFull -Recurse -Force
         }
-        if (Test-Path -LiteralPath $destinationFull) {
-            Remove-Item -LiteralPath $destinationFull -Recurse -Force
+        foreach ($relative in $required) {
+            if (-not (Test-Path -LiteralPath (Join-Path $target $relative))) { throw "Verifica aggiornamento fallita: $relative" }
         }
-        Copy-Item -LiteralPath $item.FullName -Destination $destinationFull -Recurse -Force
+    } catch {
+        $updateFailure = $_
+        foreach ($name in $installedNames) {
+            Remove-Item -LiteralPath (Join-Path $target $name) -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        foreach ($name in $backedUpNames) {
+            $backupItem = Join-Path $backupRoot $name
+            if (Test-Path -LiteralPath $backupItem) { Move-Item -LiteralPath $backupItem -Destination (Join-Path $target $name) -Force }
+        }
+        throw $updateFailure
     }
 
-    $launcher = Join-Path $target 'DeviceLogCapture.cmd'
-    Start-Process -FilePath $launcher -WorkingDirectory $target | Out-Null
+    if (-not $NoRestart) {
+        $launcher = Join-Path $target 'DeviceLogCapture.cmd'
+        Start-Process -FilePath $launcher -WorkingDirectory $target | Out-Null
+    }
 } catch {
     $logDir = Join-Path $target 'DeviceLogs'
     New-Item -ItemType Directory -Path $logDir -Force | Out-Null

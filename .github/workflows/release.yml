@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Validate PowerShell and Node.js sources
         shell: pwsh
@@ -32,7 +34,10 @@ jobs:
             }
           }
           node --check lib/cdp-capture.js
+          & ./tests/Sensitive-Data-Smoke.ps1 -IncludeHistory
           & ./tests/Static-Smoke.ps1
+          & ./tests/Sdk-Smoke.ps1
+          & ./tests/Updater-Smoke.ps1
           node --test tests/recorder-smoke.test.js
 
       - name: Validate tag and package
@@ -52,6 +57,15 @@ jobs:
             update-config.json \
             lib \
             DeviceLogs/.gitkeep
+          rm -rf package-check
+          mkdir package-check
+          unzip -q DeviceLogCaptureTool.zip -d package-check
+          test "$(tr -d '\r\n' < package-check/VERSION)" = "${version}"
+          test -f package-check/lib/device-profiles.json
+          if find package-check -type f \( -name '*.har' -o -name '*.log' \) | grep -q .; then
+            echo "The release package contains user capture files" >&2
+            exit 1
+          fi
 
       - name: Create GitHub Release
         env:

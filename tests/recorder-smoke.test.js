@@ -28,6 +28,8 @@ test('recorder writes HAR and console log with legacy fallback deduplication', (
     assert.ok(logFile, 'LOG not generated');
 
     const har = JSON.parse(fs.readFileSync(path.join(output, harFile), 'utf8'));
+    assert.equal(har.log.creator.name, 'DeviceLogCaptureTool');
+    assert.equal(har.log.creator.version, '1.4.0');
     const entries = har.log.entries;
     assert.equal(entries.length, 3);
     const native = entries.filter((entry) => !entry._fromConsole);
@@ -74,5 +76,61 @@ test('recorder falls back from /json/list to /json', () => {
   } finally {
     server.kill();
     fs.rmSync(temp, {recursive: true, force: true});
+  }
+});
+
+test('recorder tolerates missing and unresponsive CDP domains', () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), 'device-log-domain-test '));
+  try {
+    const result = spawnSync(process.execPath, [
+      '--import', pathToFileURL(path.join(testDir, 'fake-websocket.js')).href,
+      path.join(root, 'lib', 'cdp-capture.js'),
+      '--ws-url', 'ws://legacy.test/devtools/page/1',
+      '--output', output,
+      '--duration', '1',
+      '--command-timeout', '600',
+    ], {
+      encoding: 'utf8', timeout: 10000,
+      env: {...process.env, FAKE_CDP_DISABLE_NETWORK: '1', FAKE_CDP_IGNORE_LOG: '1'},
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const logFile = fs.readdirSync(output).find((name) => name.endsWith('.log'));
+    const log = fs.readFileSync(path.join(output, logFile), 'utf8');
+    assert.match(log, /Network=no/);
+    assert.match(log, /Log non disponibile/);
+    const harFile = fs.readdirSync(output).find((name) => name.endsWith('.har'));
+    const har = JSON.parse(fs.readFileSync(path.join(output, harFile), 'utf8'));
+    assert.ok(har.log.entries.length >= 2, 'console network fallback did not produce HAR entries');
+  } finally {
+    fs.rmSync(output, {recursive: true, force: true});
+  }
+});
+
+test('compatibility hook converts injected fetch telemetry to HAR', () => {
+  const output = fs.mkdtempSync(path.join(os.tmpdir(), 'device-log-hook-test '));
+  try {
+    const result = spawnSync(process.execPath, [
+      '--import', pathToFileURL(path.join(testDir, 'fake-websocket.js')).href,
+      path.join(root, 'lib', 'cdp-capture.js'),
+      '--ws-url', 'ws://legacy.test/devtools/page/1',
+      '--output', output,
+      '--duration', '1',
+      '--compat-network-hook',
+    ], {
+      encoding: 'utf8', timeout: 10000,
+      env: {...process.env, FAKE_CDP_DISABLE_NETWORK: '1', FAKE_CDP_EMIT_HOOK: '1', FAKE_CDP_REQUIRE_ES5: '1'},
+    });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    const harFile = fs.readdirSync(output).find((name) => name.endsWith('.har'));
+    const har = JSON.parse(fs.readFileSync(path.join(output, harFile), 'utf8'));
+    const hooked = har.log.entries.find((entry) => entry._fromInjectedHook);
+    assert.ok(hooked, 'injected hook entry not generated');
+    assert.equal(hooked.request.method, 'POST');
+    assert.equal(hooked.response.status, 204);
+    const logFile = fs.readdirSync(output).find((name) => name.endsWith('.log'));
+    const log = fs.readFileSync(path.join(output, logFile), 'utf8');
+    assert.match(log, /Hook network temporaneo rimosso/);
+  } finally {
+    fs.rmSync(output, {recursive: true, force: true});
   }
 });
