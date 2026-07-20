@@ -83,6 +83,17 @@ function Invoke-ToolText([string]$FilePath, [string[]]$Arguments = @()) {
     }
 }
 
+function Invoke-ToolResult([string]$FilePath, [string[]]$Arguments = @()) {
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = (& $FilePath @Arguments 2>&1 | Out-String)
+        return [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 function Show-DependencyChecks {
     Write-Host 'Verifica dipendenze e configurazione:' -ForegroundColor Yellow
     $rows = [System.Collections.Generic.List[object]]::new()
@@ -301,7 +312,7 @@ function Get-InspectorInfo([string]$Text) {
         return [pscustomobject]$result
     }
 
-    $urlMatch = [regex]::Match($Text, 'https?://([^/:\s]+)(?::(\d+))?', 'IgnoreCase')
+    $urlMatch = [regex]::Match($Text, '(?:https?|inspector)://([^/:\s]+)(?::(\d+))?', 'IgnoreCase')
     if ($urlMatch.Success) {
         $result.Host = $urlMatch.Groups[1].Value
         $result.Port = if ($urlMatch.Groups[2].Success) { [int]$urlMatch.Groups[2].Value } else { 80 }
@@ -310,15 +321,36 @@ function Get-InspectorInfo([string]$Text) {
     return [pscustomobject]$result
 }
 
-function Get-CdpTargets([string]$HostName, [int]$Port) {
+function Get-CdpTargets([string]$HostName, [int]$Port, [int]$TimeoutSeconds = 3) {
     foreach ($route in @('/json/list', '/json')) {
         try {
-            $response = Invoke-RestMethod -Uri "http://${HostName}:$Port$route" -TimeoutSec 3
+            $response = Invoke-RestMethod -Uri "http://${HostName}:$Port$route" -TimeoutSec $TimeoutSeconds
             $items = @($response)
             if ($items.Count -gt 0) { return $items }
         } catch { }
     }
     return @()
+}
+
+function Get-DirectInspectorPorts {
+    # Porte documentate dai device supportati e fallback Chromium comuni.
+    return @(9222, 9223, 9224, 9226, 7001, 7011, 7014, 8090, 9998, 9999, 52223, 8080)
+}
+
+function Test-TcpPort([string]$HostName, [int]$Port, [int]$TimeoutMilliseconds = 250) {
+    $client = [Net.Sockets.TcpClient]::new()
+    $asyncResult = $null
+    try {
+        $asyncResult = $client.BeginConnect($HostName, $Port, $null, $null)
+        if (-not $asyncResult.AsyncWaitHandle.WaitOne($TimeoutMilliseconds, $false)) { return $false }
+        $client.EndConnect($asyncResult)
+        return $client.Connected
+    } catch {
+        return $false
+    } finally {
+        if ($asyncResult -and $asyncResult.AsyncWaitHandle) { $asyncResult.AsyncWaitHandle.Close() }
+        $client.Close()
+    }
 }
 
 function Select-CdpTarget($Targets, [string]$HostName, [int]$Port) {
@@ -358,11 +390,22 @@ function Resolve-Direct([string]$InputText) {
         if ($targets.Count) { return Select-CdpTarget $targets $info.Host $info.Port }
     }
 
+    $bareEndpoint = [regex]::Match($InputText, '^\s*((?:\d{1,3}\.){3}\d{1,3}):(\d{1,5})\s*/?\s*$')
+    if ($bareEndpoint.Success) {
+        $bareHost = $bareEndpoint.Groups[1].Value
+        $barePort = [int]$bareEndpoint.Groups[2].Value
+        if ($barePort -lt 1 -or $barePort -gt 65535) { throw 'Porta endpoint non valida.' }
+        $targets = @(Get-CdpTargets $bareHost $barePort)
+        if ($targets.Count) { return Select-CdpTarget $targets $bareHost $barePort }
+        return $null
+    }
+
     $ip = Get-IPv4 $InputText
     if (-not $ip) { return $null }
     Write-Host "Cerco un endpoint DevTools su $ip..." -ForegroundColor DarkGray
-    foreach ($port in @(9222, 9223, 7011, 7014, 9998, 9999, 8080)) {
-        $targets = @(Get-CdpTargets $ip $port)
+    foreach ($port in @(Get-DirectInspectorPorts)) {
+        if (-not (Test-TcpPort $ip $port)) { continue }
+        $targets = @(Get-CdpTargets $ip $port 1)
         if ($targets.Count) { return Select-CdpTarget $targets $ip $port }
     }
     return $null
@@ -427,6 +470,7 @@ function Select-ConnectedDevice([string[]]$Serials, [string]$Suggested, [string]
     for ($i = 0; $i -lt $Serials.Count; $i++) { Write-Host "  [$($i + 1)] $($Serials[$i])" }
     $choice = Read-Host 'Selezione [1]'
     if ([string]::IsNullOrWhiteSpace($choice)) { $choice = 1 }
+    if ([string]$choice -notmatch '^\d+$') { throw 'Selezione device non valida.' }
     $index = [int]$choice - 1
     if ($index -lt 0 -or $index -ge $Serials.Count) { throw 'Selezione device non valida.' }
     return $Serials[$index]
@@ -439,49 +483,91 @@ function Start-AndroidInspector([string]$InputText) {
     if ($ip) {
         $portMatch = [regex]::Match($InputText, "$([regex]::Escape($ip)):(\d+)")
         $adbPort = if ($portMatch.Success -and [int]$portMatch.Groups[1].Value -ne 9922) { [int]$portMatch.Groups[1].Value } else { 5555 }
-        Write-Host (& $adb connect "${ip}:$adbPort" 2>&1 | Out-String).Trim()
+        $adbEndpoint = "${ip}:$adbPort"
+        $connectResult = Invoke-ToolResult $adb @('connect', $adbEndpoint)
+        Write-Host $connectResult.Output.Trim()
+        if ($connectResult.ExitCode -ne 0) { throw "Connessione ADB fallita verso ${adbEndpoint}." }
+        $script:CleanupActions.Add({ & $adb disconnect $adbEndpoint 2>&1 | Out-Null }.GetNewClosure())
     }
-    $deviceText = & $adb devices 2>&1 | Out-String
+    $deviceResult = Invoke-ToolResult $adb @('devices')
+    if ($deviceResult.ExitCode -ne 0) { throw "Impossibile leggere i device ADB: $($deviceResult.Output.Trim())" }
+    $deviceText = $deviceResult.Output
     $serials = @([regex]::Matches($deviceText, '(?m)^([^\s]+)\s+device\s*$') | ForEach-Object { $_.Groups[1].Value })
     $serial = Select-ConnectedDevice $serials $ip 'Android'
-    $unix = & $adb -s $serial shell cat /proc/net/unix 2>&1 | Out-String
+    $unixResult = Invoke-ToolResult $adb @('-s', $serial, 'shell', 'cat', '/proc/net/unix')
+    if ($unixResult.ExitCode -ne 0) { throw "Impossibile leggere i socket Android: $($unixResult.Output.Trim())" }
+    $unix = $unixResult.Output
     $sockets = @([regex]::Matches($unix, '@?([A-Za-z0-9_.-]*devtools_remote[A-Za-z0-9_.-]*)\s*$', 'Multiline') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
     if ($sockets.Count -eq 0) {
         throw "Nessun socket DevTools Android. Abilitare WebView.setWebContentsDebuggingEnabled(true) e aprire l'app."
     }
     $socket = Select-ConnectedDevice $sockets $null 'WebView/Chrome'
     $localPort = Get-FreeTcpPort
-    $forwardResult = & $adb -s $serial forward "tcp:$localPort" "localabstract:$socket" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "ADB forward fallito: $forwardResult" }
+    $forwardResult = Invoke-ToolResult $adb @('-s', $serial, 'forward', "tcp:$localPort", "localabstract:$socket")
+    if ($forwardResult.ExitCode -ne 0) { throw "ADB forward fallito: $($forwardResult.Output.Trim())" }
     $script:CleanupActions.Add({ & $adb -s $serial forward --remove "tcp:$localPort" 2>&1 | Out-Null }.GetNewClosure())
     Start-Sleep -Milliseconds 400
     $targets = @(Get-CdpTargets 'localhost' $localPort)
     return Select-CdpTarget $targets 'localhost' $localPort
 }
 
-function Start-TizenInspector([string]$InputText, [string]$AppId) {
+function Get-TizenDebugArguments([string]$Serial, [string]$AppId, [bool]$LegacyTizen) {
+    $arguments = @('-s', $Serial, 'shell', '0', 'debug', $AppId)
+    if ($LegacyTizen) { $arguments += '10' }
+    return $arguments
+}
+
+function Get-TizenInspectorPort([string]$DebugOutput) {
+    $patterns = @(
+        '(?im)(?:inspector|debug|port)[^\r\n\d]{0,30}(\d{2,5})\b',
+        '(?im)^\s*(\d{2,5})\s*$'
+    )
+    foreach ($pattern in $patterns) {
+        foreach ($match in [regex]::Matches($DebugOutput, $pattern)) {
+            $port = [int]$match.Groups[1].Value
+            if ($port -ge 1 -and $port -le 65535) { return $port }
+        }
+    }
+    return $null
+}
+
+function Start-TizenInspector([string]$InputText, [string]$AppId, [bool]$LegacyTizen = $false) {
     $sdb = Get-ToolPath @('sdb.exe', 'sdb') (@(Get-ManagedSdkFallbacks 'sdb') + @('C:\tizen-studio\tools\sdb.exe'))
     if (-not $sdb) { throw 'SDB non trovato. Installare Tizen Studio.' }
     $ip = Get-IPv4 $InputText
     if ($ip) {
         $portMatch = [regex]::Match($InputText, "$([regex]::Escape($ip)):(\d+)")
         $sdbPort = if ($portMatch.Success -and [int]$portMatch.Groups[1].Value -ne 9922) { [int]$portMatch.Groups[1].Value } else { 26101 }
-        Write-Host (& $sdb connect "${ip}:$sdbPort" 2>&1 | Out-String).Trim()
+        $sdbEndpoint = "${ip}:$sdbPort"
+        $connectResult = Invoke-ToolResult $sdb @('connect', $sdbEndpoint)
+        Write-Host $connectResult.Output.Trim()
+        if ($connectResult.ExitCode -ne 0) { throw "Connessione SDB fallita verso ${sdbEndpoint}." }
+        $script:CleanupActions.Add({ & $sdb disconnect $sdbEndpoint 2>&1 | Out-Null }.GetNewClosure())
     }
-    $deviceText = & $sdb devices 2>&1 | Out-String
+    $deviceResult = Invoke-ToolResult $sdb @('devices')
+    if ($deviceResult.ExitCode -ne 0) { throw "Impossibile leggere i device SDB: $($deviceResult.Output.Trim())" }
+    $deviceText = $deviceResult.Output
     $serials = @([regex]::Matches($deviceText, '(?m)^([^\s]+)\s+device(?:\s+.*)?$') | ForEach-Object { $_.Groups[1].Value })
     $serial = Select-ConnectedDevice $serials $ip 'Tizen'
     if ($AppId -notmatch '^[a-zA-Z0-9._-]+$') { throw 'App ID Tizen non valido.' }
-    $debugOutput = & $sdb -s $serial shell 0 debug $AppId 2>&1 | Out-String
-    Write-Host $debugOutput.Trim()
-    $portMatch = [regex]::Match($debugOutput, 'port\s*:\s*(\d+)', 'IgnoreCase')
-    if (-not $portMatch.Success) {
-        throw 'Il runtime Tizen non ha restituito la porta inspector. Verificare Developer Mode e che sia una Web App debuggabile.'
+    $debugArgs = @(Get-TizenDebugArguments $serial $AppId $LegacyTizen)
+    if ($LegacyTizen) {
+        Write-Host 'Modalità legacy Tizen <= 4: uso argomento finale 10.' -ForegroundColor DarkYellow
     }
-    $remotePort = [int]$portMatch.Groups[1].Value
+    $debugResult = Invoke-ToolResult $sdb $debugArgs
+    $debugOutput = $debugResult.Output
+    Write-Host $debugOutput.Trim()
+    if ($debugResult.ExitCode -ne 0) {
+        throw "Il comando debug SDB è fallito. Verificare App ID, certificati e Developer Mode. Output: $($debugOutput.Trim())"
+    }
+    $remotePort = Get-TizenInspectorPort $debugOutput
+    if (-not $remotePort) {
+        $legacyHint = if ($LegacyTizen) { '' } else { ' Per Tizen 4 o precedente riprovare selezionando la modalità legacy.' }
+        throw "Il runtime Tizen non ha restituito una porta inspector valida.$legacyHint"
+    }
     $localPort = Get-FreeTcpPort
-    $forwardResult = & $sdb -s $serial forward "tcp:$localPort" "tcp:$remotePort" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "SDB forward fallito: $forwardResult" }
+    $forwardResult = Invoke-ToolResult $sdb @('-s', $serial, 'forward', "tcp:$localPort", "tcp:$remotePort")
+    if ($forwardResult.ExitCode -ne 0) { throw "SDB forward fallito: $($forwardResult.Output.Trim())" }
     $script:CleanupActions.Add({ & $sdb -s $serial forward --remove "tcp:$localPort" 2>&1 | Out-Null }.GetNewClosure())
     Start-Sleep -Milliseconds 400
     $targets = @(Get-CdpTargets 'localhost' $localPort)
@@ -499,7 +585,7 @@ try {
     if (Test-ForUpdates) { exit 0 }
     if (-not (Test-Path -LiteralPath $Recorder)) { throw "Recorder non trovato: $Recorder" }
     $dependencies = Show-DependencyChecks
-    $managerPrompt = if ($dependencies.NodeReady) { 'Gestire/installare/aggiornare SDK? [g/N]' } else { 'Node.js 22+ manca. Aprire la gestione automatica? [S/n]' }
+    $managerPrompt = if ($dependencies.NodeReady) { 'Gestire/installare/aggiornare SDK? [y/N]' } else { 'Node.js 22+ manca. Aprire la gestione automatica? [Y/n]' }
     $managerAnswer = Read-Host $managerPrompt
     if (($dependencies.NodeReady -and $managerAnswer -match '^(?i:g|gestisci|s|si|sì|y|yes)$') -or
         (-not $dependencies.NodeReady -and $managerAnswer -notmatch '^(?i:n|no)$')) {
@@ -541,12 +627,15 @@ try {
     Write-Host
     Write-Host "Configurazione cattura (prima dell'avvio dell'app):" -ForegroundColor Yellow
     $appId = $null
+    $legacyTizen = $false
     if ($platform -eq '1') {
         $appId = Read-Host 'App ID webOS da ispezionare'
         if ($appId -notmatch '^[a-zA-Z0-9._-]+$') { throw 'App ID webOS non valido.' }
     } elseif ($platform -eq '3') {
         $appId = Read-Host 'App ID/package Tizen da avviare in debug'
         if ($appId -notmatch '^[a-zA-Z0-9._-]+$') { throw 'App ID Tizen non valido.' }
+        $legacyAnswer = Read-Host 'TV con Tizen 4 o precedente (comando legacy con argomento 10)? [s/N]'
+        $legacyTizen = $legacyAnswer -match '^(?i:s|si|sì|y|yes)$'
     }
     $captureName = Read-Host "Nome per i file [$nameDefault]"
     if ([string]::IsNullOrWhiteSpace($captureName)) { $captureName = $nameDefault }
@@ -559,7 +648,7 @@ try {
     if ($platform -eq '4') { $connection = Resolve-Direct $inputText }
     elseif ($platform -eq '1') { $connection = Start-WebOsInspector $inputText $appId }
     elseif ($platform -eq '2') { $connection = Start-AndroidInspector $inputText }
-    elseif ($platform -eq '3') { $connection = Start-TizenInspector $inputText $appId }
+    elseif ($platform -eq '3') { $connection = Start-TizenInspector $inputText $appId $legacyTizen }
     elseif ($platform -eq '0') {
         $connection = Resolve-Direct $inputText
         if (-not $connection) {
@@ -572,7 +661,9 @@ try {
             elseif ($manual -eq '2') { $connection = Start-AndroidInspector $inputText }
             elseif ($manual -eq '3') {
                 $manualAppId = Read-Host 'App ID/package Tizen da avviare in debug'
-                $connection = Start-TizenInspector $inputText $manualAppId
+                $manualLegacyAnswer = Read-Host 'TV con Tizen 4 o precedente (comando legacy con argomento 10)? [s/N]'
+                $manualLegacy = $manualLegacyAnswer -match '^(?i:s|si|sì|y|yes)$'
+                $connection = Start-TizenInspector $inputText $manualAppId $manualLegacy
             }
         }
     }

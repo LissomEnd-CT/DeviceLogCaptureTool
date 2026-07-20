@@ -35,7 +35,7 @@ dipendenza comune e obbligatoria.
 
 ## Installazione e aggiornamento SDK
 
-Subito dopo il controllo dipendenze, digitare `G` per aprire la gestione SDK.
+Subito dopo il controllo dipendenze, digitare `Y` per aprire la gestione SDK.
 Dal menu è possibile installare o aggiornare una singola dipendenza oppure tutte:
 
 - Node.js LTS 22 o successivo;
@@ -127,12 +127,20 @@ Il tool rileva i socket `devtools_remote` e crea/rimuove il port-forward ADB.
 - TV raggiungibile tramite SDB.
 
 Il tool esegue `sdb shell 0 debug`, legge la porta inspector e gestisce il
-port-forward.
+port-forward. Per TV con **Tizen 4 o precedente**, selezionare la modalità
+legacy: il comando diventa `sdb shell 0 debug APP_ID 10`, come richiesto dai
+runtime più vecchi. L'opzione viene chiesta prima dell'avvio dell'app. Le
+connessioni e i forward SDB creati dal tool vengono rimossi al termine.
 
 ### Endpoint diretto
 
-Sono accettati link `http://...devtools...?ws=...`, URL `ws://...` ed endpoint
-HTTP che espongono `/json/list` oppure `/json`. Gli indirizzi WebSocket
+Sono accettati link `http://...devtools...?ws=...`, URL `ws://...`, link
+`inspector://...`, valori `IP:porta` ed endpoint HTTP che espongono `/json/list`
+oppure `/json`.
+Inserendo il solo IP, la discovery prova anche le porte note per HbbTV Tizen
+(`7014`), TitanOS (`7001`), Vidaa/Hisense (`9226`), Movistar BOB (`9224`),
+SkyGlass (`8090`), Movistar legacy (`9998`) e Panasonic Viera (`52223`), oltre
+alle comuni porte Chromium. Gli indirizzi WebSocket
 `0.0.0.0` restituiti da alcuni inspector vengono sostituiti automaticamente con
 l'host del link HTTP.
 
