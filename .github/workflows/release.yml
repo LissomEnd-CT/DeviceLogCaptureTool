@@ -9,13 +9,18 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  validate-windows:
+    runs-on: windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+
+      - name: Use supported Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
 
       - name: Validate PowerShell and Node.js sources
         shell: pwsh
@@ -39,6 +44,15 @@ jobs:
           & ./tests/Sdk-Smoke.ps1
           & ./tests/Updater-Smoke.ps1
           node --test tests/recorder-smoke.test.js
+
+  release:
+    needs: validate-windows
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Validate tag and package
         shell: bash
